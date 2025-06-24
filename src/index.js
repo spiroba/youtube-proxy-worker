@@ -7,6 +7,20 @@ addEventListener('fetch', event => {
   event.respondWith(handleRequest(event.request))
 })
 
+// Извлекает video ID из YouTube URL
+function extractVideoId(url) {
+  const patterns = [
+    /(?:v=|\/embed\/|\/watch\?v=|youtu\.be\/|\/v\/|shorts\/)([a-zA-Z0-9_-]{11})/,
+    /youtube\.com\/watch\?.*v=([a-zA-Z0-9_-]{11})/
+  ];
+  
+  for (const pattern of patterns) {
+    const match = url.match(pattern);
+    if (match) return match[1];
+  }
+  return null;
+}
+
 async function handleRequest(request) {
   // Добавляем CORS заголовки для всех запросов
   const corsHeaders = {
@@ -25,13 +39,49 @@ async function handleRequest(request) {
   try {
     const url = new URL(request.url)
     const targetUrl = url.searchParams.get('url')
+    const videoId = url.searchParams.get('v') || (targetUrl ? extractVideoId(targetUrl) : null)
     
-    if (!targetUrl) {
+    if (!targetUrl && !videoId) {
       return new Response(JSON.stringify({
-        error: 'Missing url parameter',
-        usage: 'Add ?url=https://youtube.com/watch?v=VIDEO_ID'
+        error: 'Missing url or v parameter',
+        usage: 'Add ?url=https://youtube.com/watch?v=VIDEO_ID or ?v=VIDEO_ID'
       }), { 
         status: 400,
+        headers: {
+          'Content-Type': 'application/json',
+          ...corsHeaders
+        }
+      })
+    }
+
+    // Если есть video ID, используем внутренний API
+    if (videoId) {
+      try {
+        const apiResult = await getVideoViaInnerAPI(videoId)
+        if (apiResult) {
+          return new Response(JSON.stringify({
+            success: true,
+            data: apiResult,
+            source: 'youtube_inner_api',
+            extractedAt: new Date().toISOString()
+          }), {
+            headers: {
+              'Content-Type': 'application/json',
+              ...corsHeaders
+            }
+          })
+        }
+      } catch (apiError) {
+        console.error('Inner API error:', apiError)
+      }
+    }
+
+    // Fallback к HTML парсингу
+    if (!targetUrl) {
+      return new Response(JSON.stringify({
+        error: 'Inner API failed and no URL provided for HTML parsing'
+      }), { 
+        status: 404,
         headers: {
           'Content-Type': 'application/json',
           ...corsHeaders
@@ -142,6 +192,68 @@ async function handleRequest(request) {
       }
     })
   }
+}
+
+// Функция для получения видео через внутренний YouTube API
+async function getVideoViaInnerAPI(videoId) {
+  const apiUrl = 'https://www.youtube.com/youtubei/v1/player?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8'
+  
+  const payload = {
+    videoId: videoId,
+    context: {
+      client: {
+        hl: 'en',
+        gl: 'US',
+        deviceMake: 'Apple',
+        deviceModel: 'iPhone',
+        clientName: 'IOS',
+        clientVersion: '17.36.4',
+        osName: 'iOS',
+        osVersion: '16.6',
+        platform: 'MOBILE',
+        clientFormFactor: 'SMALL_FORM_FACTOR'
+      }
+    },
+    playbackContext: {
+      contentPlaybackContext: {
+        html5Preference: 'HTML5_PREF_WANTS',
+        referer: `https://www.youtube.com/watch?v=${videoId}`,
+        signatureTimestamp: 19834
+      }
+    },
+    racyCheckOk: true,
+    contentCheckOk: true
+  }
+
+  const headers = {
+    'Content-Type': 'application/json',
+    'User-Agent': 'com.google.ios.youtube/17.36.4 (iPhone; CPU iPhone OS 16_6 like Mac OS X)',
+    'X-YouTube-Client-Name': '5',
+    'X-YouTube-Client-Version': '17.36.4',
+    'Accept': 'application/json',
+    'Accept-Language': 'en-US,en;q=0.9'
+  }
+
+  try {
+    const response = await fetch(apiUrl, {
+      method: 'POST',
+      headers: headers,
+      body: JSON.stringify(payload)
+    })
+
+    if (response.ok) {
+      const data = await response.json()
+      
+      // Проверяем наличие видео данных
+      if (data && data.videoDetails && data.streamingData) {
+        return data
+      }
+    }
+  } catch (error) {
+    console.error('Inner API fetch error:', error)
+  }
+
+  return null
 }
 
 // Дополнительная функция для обработки YouTube API запросов
